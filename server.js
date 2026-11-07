@@ -37,17 +37,21 @@ function loadEnvFile() {
 
 loadEnvFile();
 
-const SUPABASE_URL = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const SUPABASE_URL = String(
+  process.env.SUPABASE_URL || ''
+).replace(/\/+$/, '');
+
 const SUPABASE_KEY =
   process.env.SUPABASE_SECRET_KEY ||
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   '';
 
 const CLOUD_READY =
-  /^https:\/\/.+\.supabase\.co$/i.test(SUPABASE_URL) &&
+  /^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(SUPABASE_URL) &&
   SUPABASE_KEY.length > 20;
 
-const clean = (v, max = 500) => String(v ?? '').trim().slice(0, max);
+const clean = (v, max = 500) =>
+  String(v ?? '').trim().slice(0, max);
 
 function send(res, status, data, type = 'application/json; charset=utf-8') {
   const headers = {
@@ -60,14 +64,19 @@ function send(res, status, data, type = 'application/json; charset=utf-8') {
 
   if (typeof res.writeHead === 'function') {
     res.writeHead(status, headers);
+
     res.end(
-      type.startsWith('application/json') ? JSON.stringify(data) : data
+      type.startsWith('application/json')
+        ? JSON.stringify(data)
+        : data
     );
   }
 }
 
 function body(req) {
-  if (req.body !== undefined) return Promise.resolve(req.body);
+  if (req.body !== undefined) {
+    return Promise.resolve(req.body);
+  }
 
   return new Promise((resolve, reject) => {
     let d = '';
@@ -93,11 +102,18 @@ function body(req) {
   });
 }
 
-// ===== KONEKSI SUPABASE DENGAN TIMEOUT =====
+// ==========================================
+// SUPABASE CONNECTION
+// ==========================================
 
 async function sb(
   pathname,
-  { method = 'GET', body: payload, prefer, headers = {} } = {}
+  {
+    method = 'GET',
+    body: payload,
+    prefer,
+    headers = {}
+  } = {}
 ) {
   if (!CLOUD_READY) {
     throw new Error('SUPABASE_NOT_CONFIGURED');
@@ -113,58 +129,75 @@ async function sb(
   if (prefer) h.Prefer = prefer;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
 
-  let r;
+  // Timeout mencakup fetch dan pembacaan response.
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, 10000);
 
   try {
-    r = await fetch(`${SUPABASE_URL}/rest/v1/${pathname}`, {
-      method,
-      headers: h,
-      body: payload === undefined ? undefined : JSON.stringify(payload),
-      signal: controller.signal
-    });
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/${pathname}`,
+      {
+        method,
+        headers: h,
+        body: payload === undefined
+          ? undefined
+          : JSON.stringify(payload),
+        signal: controller.signal
+      }
+    );
+
+    const txt = await r.text();
+
+    let data = null;
+
+    if (txt) {
+      try {
+        data = JSON.parse(txt);
+      } catch {
+        data = txt;
+      }
+    }
+
+    if (!r.ok) {
+      const msg =
+        data?.message ||
+        data?.error ||
+        `Supabase HTTP ${r.status}`;
+
+      const err = new Error(msg);
+      err.status = r.status;
+      err.detail = data;
+
+      throw err;
+    }
+
+    return data;
+
   } catch (error) {
-    if (error.name === 'AbortError') {
-      throw new Error('Koneksi Supabase timeout setelah 10 detik.');
+    if (
+      controller.signal.aborted ||
+      error.name === 'AbortError'
+    ) {
+      throw new Error(
+        'Koneksi Supabase timeout setelah 10 detik.'
+      );
     }
 
     throw error;
+
   } finally {
     clearTimeout(timeout);
   }
-
-  const txt = await r.text();
-
-  let data = null;
-
-  if (txt) {
-    try {
-      data = JSON.parse(txt);
-    } catch {
-      data = txt;
-    }
-  }
-
-  if (!r.ok) {
-    const msg =
-      data?.message ||
-      data?.error ||
-      `Supabase HTTP ${r.status}`;
-
-    const err = new Error(msg);
-    err.status = r.status;
-    err.detail = data;
-    throw err;
-  }
-
-  return data;
 }
 
 async function sessionExists(id) {
   if (!id) return null;
 
-  const q = `sessions?select=id,alias,class_name&id=eq.${encodeURIComponent(id)}&limit=1`;
+  const q =
+    `sessions?select=id,alias,class_name&id=eq.${encodeURIComponent(id)}&limit=1`;
+
   const rows = await sb(q);
 
   return rows?.[0] || null;
@@ -173,10 +206,15 @@ async function sessionExists(id) {
 async function touchSession(id) {
   if (!id) return;
 
-  await sb(`sessions?id=eq.${encodeURIComponent(id)}`, {
-    method: 'PATCH',
-    body: { last_seen: new Date().toISOString() }
-  });
+  await sb(
+    `sessions?id=eq.${encodeURIComponent(id)}`,
+    {
+      method: 'PATCH',
+      body: {
+        last_seen: new Date().toISOString()
+      }
+    }
+  );
 }
 
 function avg(rows, field) {
@@ -191,7 +229,9 @@ function avg(rows, field) {
   ) / 10;
 }
 
-// ===== DATABASE LOKAL =====
+// ==========================================
+// DATABASE LOKAL
+// ==========================================
 
 const DATA_DIR = path.join(ROOT, 'data');
 const LOCAL_FILE = path.join(DATA_DIR, 'local-db.json');
@@ -208,23 +248,36 @@ try {
   if (fs.existsSync(LOCAL_FILE)) {
     localDb = {
       ...localDb,
-      ...JSON.parse(fs.readFileSync(LOCAL_FILE, 'utf8'))
+      ...JSON.parse(
+        fs.readFileSync(LOCAL_FILE, 'utf8')
+      )
     };
   }
-} catch {}
+} catch (error) {
+  console.error('Gagal membaca database lokal:', error.message);
+}
 
 function saveLocal() {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(LOCAL_FILE, JSON.stringify(localDb));
+
+    fs.writeFileSync(
+      LOCAL_FILE,
+      JSON.stringify(localDb)
+    );
   } catch (error) {
-    console.error('Gagal menyimpan database lokal:', error.message);
+    console.error(
+      'Gagal menyimpan database lokal:',
+      error.message
+    );
   }
 }
 
-const nowStr = () => new Date().toISOString().slice(0, -1);
+const nowStr = () => new Date().toISOString();
 
-// ===== DASHBOARD =====
+// ==========================================
+// DASHBOARD
+// ==========================================
 
 function buildDashboard(sessions, attempts, evaluations) {
   const overview = {
@@ -238,15 +291,24 @@ function buildDashboard(sessions, attempts, evaluations) {
 
   for (const a of attempts) {
     const l = a.error_type || 'Tanpa kesalahan';
-    errorMap.set(l, (errorMap.get(l) || 0) + 1);
+
+    errorMap.set(
+      l,
+      (errorMap.get(l) || 0) + 1
+    );
   }
 
   const errors = [...errorMap.entries()]
-    .map(([label, total]) => ({ label, total }))
+    .map(([label, total]) => ({
+      label,
+      total
+    }))
     .sort((a, b) => b.total - a.total)
     .slice(0, 6);
 
-  const sessionMap = new Map(sessions.map(s => [s.id, s]));
+  const sessionMap = new Map(
+    sessions.map(s => [s.id, s])
+  );
 
   const recent = evaluations.slice(0, 12).map(e => ({
     alias: sessionMap.get(e.session_id)?.alias || 'Siswa',
@@ -262,7 +324,9 @@ function buildDashboard(sessions, attempts, evaluations) {
   for (const a of attempts) {
     const k = Number(a.scenario) || 1;
 
-    if (!scenarioMap.has(k)) scenarioMap.set(k, []);
+    if (!scenarioMap.has(k)) {
+      scenarioMap.set(k, []);
+    }
 
     scenarioMap.get(k).push(a);
   }
@@ -273,18 +337,31 @@ function buildDashboard(sessions, attempts, evaluations) {
       scenario,
       total: rows.length,
       avg_score: avg(rows, 'score'),
-      success_count: rows.filter(r => r.success === true).length
+      success_count: rows.filter(
+        r => r.success === true
+      ).length
     }));
 
-  return { overview, errors, recent, scenarios };
+  return {
+    overview,
+    errors,
+    recent,
+    scenarios
+  };
 }
 
-// ===== API MODE LOKAL =====
+// ==========================================
+// API MODE LOKAL
+// ==========================================
 
 async function localApi(req, res, url) {
-  const find = id => localDb.sessions.find(s => s.id === id);
+  const find = id =>
+    localDb.sessions.find(s => s.id === id);
 
-  if (req.method === 'POST' && url === '/api/session/validate') {
+  if (
+    req.method === 'POST' &&
+    url === '/api/session/validate'
+  ) {
     const b = await body(req);
     const row = find(clean(b.id, 80));
 
@@ -300,7 +377,10 @@ async function localApi(req, res, url) {
     });
   }
 
-  if (req.method === 'POST' && url === '/api/session') {
+  if (
+    req.method === 'POST' &&
+    url === '/api/session'
+  ) {
     const b = await body(req);
 
     const row = {
@@ -323,18 +403,27 @@ async function localApi(req, res, url) {
     });
   }
 
-  if (req.method === 'POST' && url === '/api/log') {
+  if (
+    req.method === 'POST' &&
+    url === '/api/log'
+  ) {
     const b = await body(req);
     const sid = clean(b.sessionId, 80);
     const action = clean(b.action, 60);
 
     if (!sid || !action) {
-      return send(res, 400, { error: 'sessionId dan action wajib.' });
+      return send(res, 400, {
+        error: 'sessionId dan action wajib.'
+      });
     }
 
     const s = find(sid);
 
-    if (!s) return send(res, 404, { error: 'Sesi tidak ditemukan.' });
+    if (!s) {
+      return send(res, 404, {
+        error: 'Sesi tidak ditemukan.'
+      });
+    }
 
     s.last_seen = nowStr();
 
@@ -351,15 +440,26 @@ async function localApi(req, res, url) {
     return send(res, 200, { ok: true });
   }
 
-  if (req.method === 'POST' && url === '/api/attempt') {
+  if (
+    req.method === 'POST' &&
+    url === '/api/attempt'
+  ) {
     const b = await body(req);
     const sid = clean(b.sessionId, 80);
 
-    if (!sid) return send(res, 400, { error: 'sessionId wajib.' });
+    if (!sid) {
+      return send(res, 400, {
+        error: 'sessionId wajib.'
+      });
+    }
 
     const s = find(sid);
 
-    if (!s) return send(res, 404, { error: 'Sesi tidak ditemukan.' });
+    if (!s) {
+      return send(res, 404, {
+        error: 'Sesi tidak ditemukan.'
+      });
+    }
 
     const row = {
       id: localDb.seq++,
@@ -378,18 +478,32 @@ async function localApi(req, res, url) {
     localDb.attempts.unshift(row);
     saveLocal();
 
-    return send(res, 200, { ok: true, id: row.id });
+    return send(res, 200, {
+      ok: true,
+      id: row.id
+    });
   }
 
-  if (req.method === 'POST' && url === '/api/evaluation') {
+  if (
+    req.method === 'POST' &&
+    url === '/api/evaluation'
+  ) {
     const b = await body(req);
     const sid = clean(b.sessionId, 80);
 
-    if (!sid) return send(res, 400, { error: 'sessionId wajib.' });
+    if (!sid) {
+      return send(res, 400, {
+        error: 'sessionId wajib.'
+      });
+    }
 
     const s = find(sid);
 
-    if (!s) return send(res, 404, { error: 'Sesi tidak ditemukan.' });
+    if (!s) {
+      return send(res, 404, {
+        error: 'Sesi tidak ditemukan.'
+      });
+    }
 
     const row = {
       id: localDb.seq++,
@@ -406,10 +520,16 @@ async function localApi(req, res, url) {
     localDb.evaluations.unshift(row);
     saveLocal();
 
-    return send(res, 200, { ok: true, id: row.id });
+    return send(res, 200, {
+      ok: true,
+      id: row.id
+    });
   }
 
-  if (req.method === 'GET' && url === '/api/dashboard') {
+  if (
+    req.method === 'GET' &&
+    url === '/api/dashboard'
+  ) {
     return send(
       res,
       200,
@@ -421,10 +541,14 @@ async function localApi(req, res, url) {
     );
   }
 
-  return send(res, 404, { error: 'Endpoint tidak ditemukan' });
+  return send(res, 404, {
+    error: 'Endpoint tidak ditemukan'
+  });
 }
 
-// ===== API UTAMA =====
+// ==========================================
+// API UTAMA
+// ==========================================
 
 async function api(req, res, url) {
   try {
@@ -432,7 +556,10 @@ async function api(req, res, url) {
       return send(res, 204, '', 'text/plain');
     }
 
-    if (req.method === 'GET' && url === '/api/health') {
+    if (
+      req.method === 'GET' &&
+      url === '/api/health'
+    ) {
       if (!CLOUD_READY) {
         return send(
           res,
@@ -458,8 +585,13 @@ async function api(req, res, url) {
           database: 'Supabase PostgreSQL',
           global: true
         });
+
       } catch (e) {
-        console.error('[HEALTH CHECK]', e.message, e.detail || '');
+        console.error(
+          '[HEALTH CHECK]',
+          e.message,
+          e.detail || ''
+        );
 
         return send(res, 503, {
           ok: false,
@@ -474,15 +606,17 @@ async function api(req, res, url) {
     if (!CLOUD_READY) {
       if (process.env.VERCEL) {
         return send(res, 503, {
-          error:
-            'Supabase belum dikonfigurasi. Isi SUPABASE_URL dan SUPABASE_SECRET_KEY di Vercel.'
+          error: 'Supabase belum dikonfigurasi. Isi SUPABASE_URL dan SUPABASE_SECRET_KEY di Vercel.'
         });
       }
 
       return localApi(req, res, url);
     }
 
-    if (req.method === 'POST' && url === '/api/session/validate') {
+    if (
+      req.method === 'POST' &&
+      url === '/api/session/validate'
+    ) {
       const b = await body(req);
       const id = clean(b.id, 80);
       const row = await sessionExists(id);
@@ -499,7 +633,10 @@ async function api(req, res, url) {
       });
     }
 
-    if (req.method === 'POST' && url === '/api/session') {
+    if (
+      req.method === 'POST' &&
+      url === '/api/session'
+    ) {
       const b = await body(req);
 
       const alias =
@@ -511,14 +648,12 @@ async function api(req, res, url) {
 
       const rows = await sb('sessions', {
         method: 'POST',
-        body: [
-          {
-            id,
-            alias,
-            class_name: cls,
-            last_seen: new Date().toISOString()
-          }
-        ],
+        body: [{
+          id,
+          alias,
+          class_name: cls,
+          last_seen: nowStr()
+        }],
         prefer: 'return=representation'
       });
 
@@ -535,7 +670,10 @@ async function api(req, res, url) {
       });
     }
 
-    if (req.method === 'POST' && url === '/api/log') {
+    if (
+      req.method === 'POST' &&
+      url === '/api/log'
+    ) {
       const b = await body(req);
       const sid = clean(b.sessionId, 80);
       const action = clean(b.action, 60);
@@ -548,20 +686,20 @@ async function api(req, res, url) {
       }
 
       if (!(await sessionExists(sid))) {
-        return send(res, 404, { error: 'Sesi tidak ditemukan.' });
+        return send(res, 404, {
+          error: 'Sesi tidak ditemukan.'
+        });
       }
 
       await Promise.all([
         touchSession(sid),
         sb('activity_logs', {
           method: 'POST',
-          body: [
-            {
-              session_id: sid,
-              action,
-              detail: detail || null
-            }
-          ],
+          body: [{
+            session_id: sid,
+            action,
+            detail: detail || null
+          }],
           prefer: 'return=minimal'
         })
       ]);
@@ -569,28 +707,35 @@ async function api(req, res, url) {
       return send(res, 200, { ok: true });
     }
 
-    if (req.method === 'POST' && url === '/api/attempt') {
+    if (
+      req.method === 'POST' &&
+      url === '/api/attempt'
+    ) {
       const b = await body(req);
       const sid = clean(b.sessionId, 80);
 
-      if (!sid) return send(res, 400, { error: 'sessionId wajib.' });
-
-      if (!(await sessionExists(sid))) {
-        return send(res, 404, { error: 'Sesi tidak ditemukan.' });
+      if (!sid) {
+        return send(res, 400, {
+          error: 'sessionId wajib.'
+        });
       }
 
-      const payload = [
-        {
-          session_id: sid,
-          scenario: Number(b.scenario) || 1,
-          level: Number(b.level) || 1,
-          success: !!b.success,
-          score: Math.max(0, Math.min(100, Number(b.score) || 0)),
-          hints_used: Math.max(0, Number(b.hintsUsed) || 0),
-          error_type: clean(b.errorType, 80) || null,
-          diagnosis: clean(b.diagnosis, 500) || null
-        }
-      ];
+      if (!(await sessionExists(sid))) {
+        return send(res, 404, {
+          error: 'Sesi tidak ditemukan.'
+        });
+      }
+
+      const payload = [{
+        session_id: sid,
+        scenario: Number(b.scenario) || 1,
+        level: Number(b.level) || 1,
+        success: !!b.success,
+        score: Math.max(0, Math.min(100, Number(b.score) || 0)),
+        hints_used: Math.max(0, Number(b.hintsUsed) || 0),
+        error_type: clean(b.errorType, 80) || null,
+        diagnosis: clean(b.diagnosis, 500) || null
+      }];
 
       const rows = await sb('attempts', {
         method: 'POST',
@@ -598,9 +743,9 @@ async function api(req, res, url) {
         prefer: 'return=representation'
       });
 
-      touchSession(sid).catch(error =>
-        console.error('[TOUCH SESSION]', error.message)
-      );
+      touchSession(sid).catch(error => {
+        console.error('[TOUCH SESSION]', error.message);
+      });
 
       return send(res, 200, {
         ok: true,
@@ -608,26 +753,33 @@ async function api(req, res, url) {
       });
     }
 
-    if (req.method === 'POST' && url === '/api/evaluation') {
+    if (
+      req.method === 'POST' &&
+      url === '/api/evaluation'
+    ) {
       const b = await body(req);
       const sid = clean(b.sessionId, 80);
 
-      if (!sid) return send(res, 400, { error: 'sessionId wajib.' });
-
-      if (!(await sessionExists(sid))) {
-        return send(res, 404, { error: 'Sesi tidak ditemukan.' });
+      if (!sid) {
+        return send(res, 400, {
+          error: 'sessionId wajib.'
+        });
       }
 
-      const payload = [
-        {
-          session_id: sid,
-          score: Math.max(0, Math.min(100, Number(b.score) || 0)),
-          correct: Math.max(0, Number(b.correct) || 0),
-          total: Math.max(0, Number(b.total) || 0),
-          reflection_difficulty: clean(b.difficulty, 500) || null,
-          reflection_benefit: clean(b.benefit, 500) || null
-        }
-      ];
+      if (!(await sessionExists(sid))) {
+        return send(res, 404, {
+          error: 'Sesi tidak ditemukan.'
+        });
+      }
+
+      const payload = [{
+        session_id: sid,
+        score: Math.max(0, Math.min(100, Number(b.score) || 0)),
+        correct: Math.max(0, Number(b.correct) || 0),
+        total: Math.max(0, Number(b.total) || 0),
+        reflection_difficulty: clean(b.difficulty, 500) || null,
+        reflection_benefit: clean(b.benefit, 500) || null
+      }];
 
       const rows = await sb('evaluations', {
         method: 'POST',
@@ -635,9 +787,9 @@ async function api(req, res, url) {
         prefer: 'return=representation'
       });
 
-      touchSession(sid).catch(error =>
-        console.error('[TOUCH SESSION]', error.message)
-      );
+      touchSession(sid).catch(error => {
+        console.error('[TOUCH SESSION]', error.message);
+      });
 
       return send(res, 200, {
         ok: true,
@@ -645,24 +797,38 @@ async function api(req, res, url) {
       });
     }
 
-    if (req.method === 'GET' && url === '/api/dashboard') {
-      const [sessions, attempts, evaluations] = await Promise.all([
-        sb('sessions?select=id,alias,class_name,created_at,last_seen&order=created_at.desc'),
-        sb('attempts?select=id,session_id,scenario,level,success,score,hints_used,error_type,diagnosis,created_at&order=created_at.desc'),
-        sb('evaluations?select=id,session_id,score,correct,total,reflection_difficulty,reflection_benefit,created_at&order=created_at.desc')
-      ]);
+    if (
+      req.method === 'GET' &&
+      url === '/api/dashboard'
+    ) {
+      const [sessions, attempts, evaluations] =
+        await Promise.all([
+          sb('sessions?select=id,alias,class_name,created_at,last_seen&order=created_at.desc'),
+          sb('attempts?select=id,session_id,scenario,level,success,score,hints_used,error_type,diagnosis,created_at&order=created_at.desc'),
+          sb('evaluations?select=id,session_id,score,correct,total,reflection_difficulty,reflection_benefit,created_at&order=created_at.desc')
+        ]);
 
       return send(
         res,
         200,
-        buildDashboard(sessions, attempts, evaluations)
+        buildDashboard(
+          sessions,
+          attempts,
+          evaluations
+        )
       );
     }
 
-    return send(res, 404, { error: 'Endpoint tidak ditemukan' });
+    return send(res, 404, {
+      error: 'Endpoint tidak ditemukan'
+    });
 
   } catch (e) {
-    console.error('[VLANesia]', e.message, e.detail || '');
+    console.error(
+      '[VLANesia]',
+      e.message,
+      e.detail || ''
+    );
 
     const status =
       e.message === 'SUPABASE_NOT_CONFIGURED'
@@ -672,16 +838,17 @@ async function api(req, res, url) {
           : 400;
 
     return send(res, status, {
-      error:
-        e.message === 'SUPABASE_NOT_CONFIGURED'
-          ? 'Supabase belum dikonfigurasi.'
-          : 'Permintaan gagal diproses pada database cloud.',
+      error: e.message === 'SUPABASE_NOT_CONFIGURED'
+        ? 'Supabase belum dikonfigurasi.'
+        : 'Permintaan gagal diproses pada database cloud.',
       detail: e.message
     });
   }
 }
 
-// ===== SERVER LOKAL =====
+// ==========================================
+// SERVER LOKAL
+// ==========================================
 
 const mime = {
   '.html': 'text/html; charset=utf-8',
@@ -690,12 +857,16 @@ const mime = {
   '.json': 'application/json; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon'
 };
 
 const server = http.createServer(async (req, res) => {
-  const u = new URL(req.url, `http://${req.headers.host}`);
+  const u = new URL(
+    req.url,
+    `http://${req.headers.host}`
+  );
 
   if (u.pathname.startsWith('/api/')) {
     return api(req, res, u.pathname);
@@ -705,33 +876,51 @@ const server = http.createServer(async (req, res) => {
     ? 'index.html'
     : u.pathname.replace(/^\//, '');
 
-  let file = path.normalize(path.join(PUBLIC, rel));
+  let file = path.normalize(
+    path.join(PUBLIC, rel)
+  );
 
   if (!file.startsWith(PUBLIC)) {
-    return send(res, 403, 'Forbidden', 'text/plain');
+    return send(
+      res,
+      403,
+      'Forbidden',
+      'text/plain'
+    );
   }
 
-  if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+  if (
+    !fs.existsSync(file) ||
+    fs.statSync(file).isDirectory()
+  ) {
     file = path.join(PUBLIC, 'index.html');
   }
 
   fs.readFile(file, (err, data) => {
     if (err) {
-      return send(res, 500, 'Server error', 'text/plain');
+      return send(
+        res,
+        500,
+        'Server error',
+        'text/plain'
+      );
     }
 
     send(
       res,
       200,
       data,
-      mime[path.extname(file)] || 'application/octet-stream'
+      mime[path.extname(file)] ||
+        'application/octet-stream'
     );
   });
 });
 
 if (require.main === module) {
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`VLANesia berjalan di http://127.0.0.1:${PORT}`);
+    console.log(
+      `VLANesia berjalan di http://127.0.0.1:${PORT}`
+    );
 
     console.log(
       CLOUD_READY
